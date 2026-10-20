@@ -21,6 +21,37 @@ def main(argv=None):
     o = sub.add_parser("ingest-obsidian", help="ingest Obsidian Clipper transcript notes")
     o.add_argument("folder")
 
+    f = sub.add_parser("fetch-media", help="download audio (or --video) for YouTube episodes -> media_path")
+    f.add_argument("--episode", type=int)
+    f.add_argument("--match", help="regex on episode title")
+    f.add_argument("--limit", type=int)
+    f.add_argument("--video", action="store_true", help="mp4 instead of audio-only")
+    f.add_argument("--force", action="store_true", help="re-download even if media_path is set")
+
+    d = sub.add_parser("diarize", help="label who's talking (needs local media + pyannote)")
+    d.add_argument("--episode", type=int)
+    d.add_argument("--match")
+    d.add_argument("--limit", type=int)
+    d.add_argument("--redo", action="store_true")
+    d.add_argument("--num-speakers", type=int)
+    d.add_argument("--min-speakers", type=int)
+    d.add_argument("--max-speakers", type=int)
+
+    sp = sub.add_parser("speakers", help="voiceprints + diarized episodes, or one episode's clusters with sample lines")
+    sp.add_argument("episode", type=int, nargs="?")
+
+    lb = sub.add_parser("label", help="name a cluster (and enroll it as a voiceprint), e.g. `jbp label 3 SPEAKER_01 joe`")
+    lb.add_argument("episode", type=int)
+    lb.add_argument("cluster")
+    lb.add_argument("name")
+    lb.add_argument("--no-enroll", action="store_true", help="name it in this episode only")
+
+    en = sub.add_parser("enroll", help="enroll a voiceprint from hand-picked solo ranges")
+    en.add_argument("name")
+    en.add_argument("--audio")
+    en.add_argument("--episode", type=int)
+    en.add_argument("--at", action="append", default=[], help="START-END, e.g. 00:10:00-00:11:30 (repeatable)")
+
     i = sub.add_parser("index", help="chunk + embed new episodes")
     i.add_argument("--no-embed", action="store_true")
     i.add_argument("--rechunk", action="store_true")
@@ -29,7 +60,7 @@ def main(argv=None):
     s.add_argument("query")
     s.add_argument("--mode", choices=["kw", "sem", "hybrid"], default="hybrid")
     s.add_argument("--limit", type=int, default=20)
-    s.add_argument("--speaker", help="filter by diarized speaker label (no-op until diarization exists)")
+    s.add_argument("--speaker", help="only hits where this speaker dominates (undiarized episodes pass through)")
     s.add_argument("--min-score", type=float, default=0.0)
     s.add_argument("--out", help="write a cutlist CSV")
 
@@ -58,6 +89,25 @@ def main(argv=None):
     elif a.cmd == "ingest-obsidian":
         from .ingest_obsidian import ingest
         ingest(a.folder)
+    elif a.cmd == "fetch-media":
+        from .media import fetch
+        fetch(episode=a.episode, match=a.match, limit=a.limit, video=a.video, force=a.force)
+    elif a.cmd == "diarize":
+        from .diarize import run
+        run(episode=a.episode, match_title=a.match, limit=a.limit, redo=a.redo, num_speakers=a.num_speakers,
+            min_speakers=a.min_speakers, max_speakers=a.max_speakers)
+    elif a.cmd == "speakers":
+        from . import db, diarize
+        conn = db.connect()
+        diarize.show(conn, a.episode) if a.episode else diarize.overview(conn)
+    elif a.cmd == "label":
+        from .diarize import label
+        label(a.episode, a.cluster, a.name, enroll=not a.no_enroll)
+    elif a.cmd == "enroll":
+        from .diarize import enroll_audio
+        from .timeutil import parse_ts
+        spans = [tuple(parse_ts(x) for x in r.split("-", 1)) for r in a.at]
+        enroll_audio(a.name, spans, audio=a.audio, episode=a.episode)
     elif a.cmd == "index":
         from .index import build
         build(embeddings=not a.no_embed, rechunk=a.rechunk)
@@ -89,6 +139,9 @@ def main(argv=None):
             print(f"{src:12s} {n:5d} episodes  {segs:8d} lines")
         ch, emb = conn.execute("SELECT COUNT(*), COUNT(embedding) FROM chunks").fetchone()
         print(f"chunks: {ch}  embedded: {emb}")
+        media, diar = conn.execute("SELECT COUNT(media_path), SUM(diarized) FROM episodes WHERE media_path != ''").fetchone()
+        vps = [r[0] for r in conn.execute("SELECT name FROM voiceprints")]
+        print(f"with media: {media}  diarized: {diar or 0}  voiceprints: {', '.join(vps) or '-'}")
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ at 3–5am, clowning co-hosts who sleep late, and tying early rising to his succ
 4. **Cut** — search hits → `cutlist.csv` (review/edit by hand) → ffmpeg commands that cut from the
    owner's own local media files and concat them.
 
-## Status (v0.1)
+## Status (v0.2)
 - Tested offline with synthetic data: VTT rolling-caption parsing, Obsidian note parsing, chunking,
   FTS5 keyword search (with hit "focus" to the matching line), semantic + hybrid (RRF) with a stub
   embedder, themes, cutlist CSV, ffmpeg cut + concat.
@@ -34,9 +34,13 @@ at 3–5am, clowning co-hosts who sleep late, and tying early rising to his succ
   ask for a sample note if ingest reports 0 notes.
 
 ## Known gaps / next steps (in priority order)
-1. **Speaker diarization** — YouTube captions have no speaker labels; we need to filter to Joe.
-   Plan: WhisperX + pyannote on audio, enroll Joe's voice once, write `speaker` into `segments`.
-   `segments.speaker` column already exists; search has a `--speaker` filter that's a no-op until filled.
+1. **Speaker diarization — built (v0.2), untested on real audio.** `fetch-media` (yt-dlp audio for
+   YouTube episodes → `media_path`), `diarize` (pyannote 3.1 turns + wespeaker cluster embeddings →
+   `segments.cluster`/`speaker`, `ep_speakers`), `speakers`/`label`/`enroll` (voiceprints table, running
+   mean). Search `--speaker` = matched line is theirs OR ≥40% of window talk time. Tested offline with a
+   stub backend only. First live run: fetch + diarize one episode, `jbp speakers <id>`, label Joe, then
+   diarize a few more and tune `JBP_VOICE_THRESHOLD` from the printed scores. If pyannote's API differs
+   from the 3.x/4.x handling in `diarize.Pyannote`, fix it there; the rest is backend-agnostic.
 2. Timestamp offset between transcript source and the media file being cut (intros/ads differ between
    YouTube and Patreon audio). Cut list has a per-row `offset` column; consider auto-alignment.
 3. Swap brute-force cosine for sqlite-vec once the corpus is large (~200k chunks for the full catalog).

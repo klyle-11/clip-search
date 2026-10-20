@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     published   TEXT,
     media_path  TEXT,                   -- local media file to cut from, if any
     indexed     INTEGER DEFAULT 0,
+    diarized    INTEGER DEFAULT 0,
     UNIQUE(source, source_id)
 );
 CREATE TABLE IF NOT EXISTS segments (
@@ -25,7 +26,8 @@ CREATE TABLE IF NOT EXISTS segments (
     start       REAL NOT NULL,
     end         REAL NOT NULL,
     text        TEXT NOT NULL,
-    speaker     TEXT                    -- filled later by diarization
+    speaker     TEXT,                   -- voiceprint name, else raw cluster label
+    cluster     TEXT                    -- raw diarization label (SPEAKER_00 ...)
 );
 CREATE INDEX IF NOT EXISTS seg_ep ON segments(episode_id, start);
 CREATE TABLE IF NOT EXISTS chunks (
@@ -36,6 +38,21 @@ CREATE TABLE IF NOT EXISTS chunks (
     text        TEXT NOT NULL,
     speakers    TEXT,                   -- comma-joined speakers in window
     embedding   BLOB
+);
+CREATE TABLE IF NOT EXISTS voiceprints (
+    name        TEXT PRIMARY KEY,
+    embedding   BLOB NOT NULL,          -- running mean of enrolled embeddings (L2-normalized)
+    n           INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS ep_speakers (
+    episode_id  INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    cluster     TEXT NOT NULL,
+    seconds     REAL NOT NULL,          -- total talk time in the episode
+    embedding   BLOB,                   -- cluster voice embedding
+    name        TEXT,                   -- matched/labelled voiceprint
+    score       REAL,                   -- cosine to that voiceprint
+    manual      INTEGER DEFAULT 0,      -- set by `jbp label`; never overwritten by auto-matching
+    PRIMARY KEY (episode_id, cluster)
 );
 CREATE INDEX IF NOT EXISTS chunk_ep ON chunks(episode_id, start);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -50,6 +67,10 @@ END;
 """
 
 
+# columns added after v0.1 — ALTER existing DBs in place
+MIGRATIONS = [("episodes", "diarized", "INTEGER DEFAULT 0"), ("segments", "cluster", "TEXT")]
+
+
 def connect(path: str | None = None) -> sqlite3.Connection:
     path = path or os.getenv("JBP_DB", "data/jbp.db")
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -58,6 +79,9 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
+    for table, col, decl in MIGRATIONS:
+        if col not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     return conn
 
 

@@ -7,6 +7,7 @@ dependencies = ["yt-dlp", "numpy", "python-dotenv"]
 [project.optional-dependencies]
 semantic = ["sentence-transformers"]
 whisper = ["faster-whisper", "feedparser", "requests"]
+diarize = ["pyannote.audio>=3.1"]
 
 [project.scripts]
 jbp = "jbp.cli:main"

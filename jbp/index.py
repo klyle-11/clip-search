@@ -21,6 +21,15 @@ def embed(texts: list[str]) -> np.ndarray:
                               show_progress_bar=len(texts) > 200).astype(np.float32)
 
 
+def speakers_by_time(segs) -> str | None:
+    """Comma-joined speakers in these segments, most talk time first."""
+    secs: dict[str, float] = {}
+    for s in segs:
+        if s["speaker"]:
+            secs[s["speaker"]] = secs.get(s["speaker"], 0.0) + s["end"] - s["start"]
+    return ",".join(sorted(secs, key=lambda k: -secs[k])) or None
+
+
 def make_chunks(segs, window: float = 45.0, stride: float = 30.0):
     """segs: rows with start/end/text/speaker sorted by start. Yields (start, end, text, speakers)."""
     if not segs:
@@ -37,8 +46,7 @@ def make_chunks(segs, window: float = 45.0, stride: float = 30.0):
             win.append(segs[j])
             j += 1
         if win:
-            spk = sorted({s["speaker"] for s in win if s["speaker"]})
-            yield (win[0]["start"], win[-1]["end"], " ".join(s["text"] for s in win), ",".join(spk) or None)
+            yield (win[0]["start"], win[-1]["end"], " ".join(s["text"] for s in win), speakers_by_time(win))
         t += stride
 
 

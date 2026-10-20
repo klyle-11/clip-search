@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from . import db
+from .index import speakers_by_time
 from .timeutil import fmt_ts, yt_link
 
 
@@ -23,6 +24,7 @@ class Hit:
     speakers: str | None
     score: float = 0.0
     via: set = field(default_factory=set)
+    line_speaker: str | None = None   # speaker of the line a keyword hit was focused on
 
 
 _COLS = """c.id AS chunk_id, c.episode_id, e.title, e.url, e.media_path, c.start, c.end, c.text, c.speakers"""
@@ -36,10 +38,29 @@ def _fts_query(q: str) -> str:
     return " ".join(f'"{w}"' for w in words)
 
 
-def _speaker_ok(h: Hit, speaker: str | None) -> bool:
-    if not speaker or not h.speakers:   # no diarization yet -> don't filter
+MIN_SHARE = 0.4   # speaker must hold at least this much of the hit window's talk time
+
+
+def speaker_share(conn, h: Hit, speaker: str) -> float | None:
+    """Fraction of diarized talk time in [h.start, h.end) that belongs to `speaker` (None = not diarized)."""
+    rows = conn.execute(
+        """SELECT speaker, SUM(end - start) AS secs FROM segments
+           WHERE episode_id=? AND start>=? AND start<? AND speaker IS NOT NULL GROUP BY speaker""",
+        (h.episode_id, h.start, h.end),
+    ).fetchall()
+    total = sum(r["secs"] for r in rows)
+    if not total:
+        return None
+    return sum(r["secs"] for r in rows if r["speaker"].lower() == speaker.lower()) / total
+
+
+def _speaker_ok(conn, h: Hit, speaker: str | None) -> bool:
+    if not speaker:
         return True
-    return speaker.lower() in h.speakers.lower()
+    if h.line_speaker and h.line_speaker.lower() == speaker.lower():
+        return True
+    share = speaker_share(conn, h, speaker)
+    return share is None or share >= MIN_SHARE   # undiarized episodes pass through
 
 
 def keyword(conn, q: str, limit: int = 50, speaker: str | None = None) -> list[Hit]:
@@ -50,7 +71,8 @@ def keyword(conn, q: str, limit: int = 50, speaker: str | None = None) -> list[H
         (_fts_query(q), limit * 3),
     ).fetchall()
     hits = [Hit(**{k: r[k] for k in r.keys() if k != "rank"}, score=-r["rank"], via={"kw"}) for r in rows]
-    return [focus(conn, h, q) for h in hits if _speaker_ok(h, speaker)][:limit]
+    hits = [focus(conn, h, q, speaker) for h in hits]
+    return [h for h in hits if _speaker_ok(conn, h, speaker)][:limit]
 
 
 def semantic(conn, q: str, limit: int = 50, speaker: str | None = None, min_score: float = 0.0) -> list[Hit]:
@@ -72,7 +94,7 @@ def semantic(conn, q: str, limit: int = 50, speaker: str | None = None, min_scor
             break
         r = rows[i]
         h = Hit(**{k: r[k] for k in r.keys() if k != "embedding"}, score=float(scores[i]), via={"sem"})
-        if _speaker_ok(h, speaker):
+        if _speaker_ok(conn, h, speaker):
             hits.append(h)
     return hits
 
@@ -87,18 +109,22 @@ def rrf(*lists: list[Hit], k: int = 60) -> list[Hit]:
     return sorted(merged.values(), key=lambda h: -h.score)
 
 
-def focus(conn, hit: Hit, q: str, before: float = 12.0, after: float = 30.0) -> Hit:
-    """Tighten a keyword hit to the first segment in the chunk that contains a query word."""
+def focus(conn, hit: Hit, q: str, speaker: str | None = None, before: float = 12.0, after: float = 30.0) -> Hit:
+    """Tighten a keyword hit to the best-matching segment in the chunk (preferring `speaker`'s lines)."""
     words = [w.lower() for w in re.findall(r"[\w']{3,}", q) if w.upper() not in {"AND", "OR", "NOT", "NEAR"}]
     if not words:
         return hit
     segs = conn.execute(
-        "SELECT start, end, text FROM segments WHERE episode_id=? AND start>=? AND start<? ORDER BY start",
+        "SELECT start, end, text, speaker FROM segments WHERE episode_id=? AND start>=? AND start<? ORDER BY start",
         (hit.episode_id, hit.start, hit.end),
     ).fetchall()
-    best = max(segs, key=lambda s: sum(w in s["text"].lower() for w in words), default=None)
+    def score(s):
+        mine = bool(speaker and s["speaker"] and s["speaker"].lower() == speaker.lower())
+        return sum(w in s["text"].lower() for w in words) + 0.5 * mine
+    best = max(segs, key=score, default=None)
     if best is None or not any(w in best["text"].lower() for w in words):
         return hit
+    hit.line_speaker = best["speaker"]
     hit.start = max(hit.start, best["start"] - before)
     hit.end = min(hit.end, best["end"] + after)
     return hit
@@ -117,6 +143,15 @@ def dedupe_overlaps(hits: list[Hit], gap: float = 10.0) -> list[Hit]:
     return kept
 
 
+def window_speakers(conn, hits: list[Hit]) -> list[Hit]:
+    """Re-derive each hit's speakers from its (possibly focused) window rather than the whole chunk."""
+    for h in hits:
+        segs = conn.execute("SELECT start, end, speaker FROM segments WHERE episode_id=? AND start>=? AND start<?",
+                            (h.episode_id, h.start, h.end)).fetchall()
+        h.speakers = speakers_by_time(segs) or h.speakers
+    return hits
+
+
 def run(q: str, mode: str = "hybrid", limit: int = 20, speaker: str | None = None, min_score: float = 0.0) -> list[Hit]:
     conn = db.connect()
     if mode == "kw":
@@ -125,7 +160,7 @@ def run(q: str, mode: str = "hybrid", limit: int = 20, speaker: str | None = Non
         hits = semantic(conn, q, limit * 2, speaker, min_score)
     else:
         hits = rrf(keyword(conn, q, limit * 3, speaker), semantic(conn, q, limit * 3, speaker, min_score))
-    return dedupe_overlaps(hits)[:limit]
+    return window_speakers(conn, dedupe_overlaps(hits)[:limit])
 
 
 def run_theme(theme: dict, speaker: str | None = None) -> list[Hit]:
@@ -137,19 +172,20 @@ def run_theme(theme: dict, speaker: str | None = None) -> list[Hit]:
             lists.append(keyword(conn, kw, limit * 2, speaker))
         except Exception as e:  # bad FTS syntax shouldn't kill the run
             print(f"  ! keyword {kw!r}: {e}")
-    return dedupe_overlaps(rrf(*lists))[:limit]
+    return window_speakers(conn, dedupe_overlaps(rrf(*lists))[:limit])
 
 
 def print_hits(hits: list[Hit], width: int = 220) -> None:
     for n, h in enumerate(hits, 1):
         snippet = h.text if len(h.text) <= width else h.text[:width] + "…"
-        print(f"\n[{n}] {h.title}  {fmt_ts(h.start)}–{fmt_ts(h.end)}  ({'+'.join(sorted(h.via))} {h.score:.3g})")
+        spk = f"  [{h.speakers}]" if h.speakers else ""
+        print(f"\n[{n}] {h.title}  {fmt_ts(h.start)}–{fmt_ts(h.end)}  ({'+'.join(sorted(h.via))} {h.score:.3g}){spk}")
         if h.url:
             print(f"    {yt_link(h.url, h.start)}")
         print(f"    {snippet}")
 
 
-CUT_FIELDS = ["keep", "title", "start", "end", "pad", "offset", "media_path", "link", "text"]
+CUT_FIELDS = ["keep", "title", "speakers", "start", "end", "pad", "offset", "media_path", "link", "text"]
 
 
 def write_cutlist(hits: list[Hit], out: str, pad: float = 3.0) -> None:
@@ -159,7 +195,7 @@ def write_cutlist(hits: list[Hit], out: str, pad: float = 3.0) -> None:
         w.writeheader()
         for h in hits:
             w.writerow({
-                "keep": "y", "title": h.title, "start": fmt_ts(h.start), "end": fmt_ts(h.end),
+                "keep": "y", "title": h.title, "speakers": h.speakers or "", "start": fmt_ts(h.start), "end": fmt_ts(h.end),
                 "pad": pad, "offset": 0, "media_path": h.media_path or "",
                 "link": yt_link(h.url, h.start), "text": h.text[:500],
             })

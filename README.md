@@ -8,6 +8,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e .            # core: yt-dlp, numpy
 pip install -e ".[semantic]"   # + sentence-transformers for theme search
 pip install -e ".[whisper]"    # + faster-whisper, feedparser for Patreon audio
+pip install -e ".[diarize]"    # + pyannote.audio for speaker labels (HF_TOKEN in .env)
 ```
 Needs `ffmpeg` on PATH for cutting.
 
@@ -33,6 +34,22 @@ jbp theme early-riser --out cutlists/early-riser.csv
 # 6. Edit the CSV (drop rows, set media_path/offset), then cut
 jbp cut cutlists/early-riser.csv --out out/early-riser.mp4
 ```
+
+## Speakers (filter to Joe)
+Diarization needs local audio. For YouTube episodes, `fetch-media` pulls it from the same video the
+captions came from, so offset stays 0 and the file doubles as the cut source.
+```bash
+jbp fetch-media --episode 1            # or --match 'Episode 97\d' --limit 10 ; --video for mp4
+jbp diarize --episode 1
+jbp speakers 1                         # clusters + sample lines + links: find which one is Joe
+jbp label 1 SPEAKER_01 joe             # enrolls Joe's voiceprint, re-matches every diarized episode
+jbp diarize --limit 20                 # later episodes auto-label joe
+jbp search "4 in the morning" --mode kw --speaker joe
+```
+Label a few more episodes to firm up the voiceprint (samples are averaged). Auto-match cutoff is
+`JBP_VOICE_THRESHOLD` (cosine, default 0.55): check `jbp speakers` scores and tune. `--speaker` keeps a
+hit if the matched line is theirs, or if they hold ≥40% of the hit window's talk time. Undiarized
+episodes always pass through.
 
 ## Themes
 Add reusable compilations to `themes.toml` — a theme is a description (semantic) plus keyword queries.
