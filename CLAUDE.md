@@ -6,8 +6,6 @@ and turning them into compilation cut lists. First target compilation: Joe talki
 at 3–5am, clowning co-hosts who sleep late, and tying early rising to his success.
 
 ## Owner context
-- Owner is a former full-stack engineer (Python/TS/Java), runs a homelab. Prefers local-first,
-  self-hosted tooling. Don't over-explain basics.
 - Obsidian Web Clipper is already used to save some YouTube transcripts as markdown. Those can be
   ingested too (`jbp ingest-obsidian`).
 
