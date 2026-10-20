@@ -1,0 +1,15 @@
+[project]
+name = "jbp-search"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["yt-dlp", "numpy", "python-dotenv"]
+
+[project.optional-dependencies]
+semantic = ["sentence-transformers"]
+whisper = ["faster-whisper", "feedparser", "requests"]
+
+[project.scripts]
+jbp = "jbp.cli:main"
+
+[tool.setuptools]
+packages = ["jbp"]

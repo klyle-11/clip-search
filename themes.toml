@@ -1,0 +1,8 @@
+[early-riser]
+description = "Joe Budden talking about waking up very early, 3am 4am 5am, making fun of co-hosts who sleep late or wake up at noon, saying getting up early is part of why he's successful"
+keywords = [
+  "\"4 in the morning\"", "\"5 in the morning\"", "\"3 in the morning\"",
+  "\"wake up\" early", "noon alarm", "\"go to bed\"", "\"up at\" sleep",
+]
+min_score = 0.35
+limit = 40
