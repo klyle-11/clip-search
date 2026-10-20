@@ -5,7 +5,7 @@ gets a voice embedding (mean over its longest turns). Clusters whose embedding i
 enrolled voiceprint (e.g. "joe") take that name; the rest keep their raw label. Every transcript line
 gets the speaker it overlaps most.
 
-Enrollment: diarize one episode, `jbp speakers <ep>` to see who's who, then `jbp label <ep> SPEAKER_01 joe`.
+Enrollment: diarize one episode, `clipsearch speakers <ep>` to see who's who, then `clipsearch label <ep> SPEAKER_01 joe`.
 That cluster's embedding becomes (or is averaged into) Joe's voiceprint and all diarized episodes are
 re-matched — no audio reprocessing needed.
 
@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from . import db
+from .config import env
 from .index import speakers_by_time
 from .media import select_episodes
 from .timeutil import fmt_ts, yt_link
@@ -29,7 +30,7 @@ MAX_TURNS = 8         # per cluster
 
 
 def _threshold() -> float:
-    return float(os.getenv("JBP_VOICE_THRESHOLD", "0.55"))
+    return float(env("VOICE_THRESHOLD", "0.55"))
 
 
 def _norm(v: np.ndarray) -> np.ndarray:
@@ -66,8 +67,8 @@ class Pyannote:
 
         token = os.getenv("HF_TOKEN")
         self.pipeline = _from_pretrained(
-            Pipeline, os.getenv("JBP_DIARIZE_MODEL", "pyannote/speaker-diarization-3.1"), token)
-        model = _from_pretrained(Model, os.getenv("JBP_VOICE_MODEL", "pyannote/wespeaker-voxceleb-resnet34-LM"), token)
+            Pipeline, env("DIARIZE_MODEL", "pyannote/speaker-diarization-3.1"), token)
+        model = _from_pretrained(Model, env("VOICE_MODEL", "pyannote/wespeaker-voxceleb-resnet34-LM"), token)
         if self.pipeline is None or model is None:
             raise SystemExit("couldn't load pyannote models — set HF_TOKEN and accept the model terms on huggingface.co")
         self.inference = Inference(model, window="whole")
@@ -218,7 +219,7 @@ def run(*, episode=None, match_title=None, limit=None, redo=False, num_speakers=
            if Path(e["media_path"]).exists()]
     eps = eps[:limit] if limit else eps
     if not eps:
-        print("nothing to diarize — episodes need a local media_path (`jbp fetch-media` for YouTube)")
+        print("nothing to diarize — episodes need a local media_path (`clipsearch fetch-media` for YouTube)")
         return
     backend = backend or Pyannote()
     for ep in eps:
@@ -228,7 +229,7 @@ def run(*, episode=None, match_title=None, limit=None, redo=False, num_speakers=
         conn.commit()
         show(conn, ep["id"], samples=0)
     if not voiceprints(conn):
-        print("\nno voiceprints yet: `jbp speakers <episode id>` to see who's who, then `jbp label <ep> SPEAKER_XX joe`")
+        print("\nno voiceprints yet: `clipsearch speakers <episode id>` to see who's who, then `clipsearch label <ep> SPEAKER_XX joe`")
 
 
 def show(conn, episode_id: int, samples: int = 3) -> None:
@@ -278,7 +279,7 @@ def label(episode_id: int, cluster: str, name: str, *, enroll: bool = True) -> N
     conn = db.connect()
     row = conn.execute("SELECT * FROM ep_speakers WHERE episode_id=? AND cluster=?", (episode_id, cluster)).fetchone()
     if not row:
-        raise SystemExit(f"episode {episode_id} has no cluster {cluster!r} (see `jbp speakers {episode_id}`)")
+        raise SystemExit(f"episode {episode_id} has no cluster {cluster!r} (see `clipsearch speakers {episode_id}`)")
     conn.execute("UPDATE ep_speakers SET name=?, score=NULL, manual=1 WHERE episode_id=? AND cluster=?",
                  (name, episode_id, cluster))
     if enroll and row["embedding"]:

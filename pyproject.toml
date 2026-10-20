@@ -1,7 +1,7 @@
 [project]
-name = "jbp-search"
-version = "0.1.0"
-requires-python = ">=3.10"
+name = "clipsearch"
+version = "0.4.0"
+requires-python = ">=3.11"
 dependencies = ["yt-dlp", "numpy", "python-dotenv"]
 
 [project.optional-dependencies]
@@ -10,7 +10,10 @@ whisper = ["faster-whisper", "feedparser", "requests"]
 diarize = ["pyannote.audio>=3.1"]
 
 [project.scripts]
-jbp = "jbp.cli:main"
+clipsearch = "clipsearch.cli:main"
 
 [tool.setuptools]
-packages = ["jbp"]
+packages = ["clipsearch"]
+
+[tool.setuptools.package-data]
+clipsearch = ["*.html"]

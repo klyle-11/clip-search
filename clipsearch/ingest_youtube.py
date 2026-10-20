@@ -41,7 +41,7 @@ def parse_vtt(text: str) -> list[tuple[float, float, str]]:
 
 
 def ingest(url: str, *, limit: int | None = None, lang: str = "en", subs_dir: str = "data/subs",
-           title_filter: str | None = None) -> None:
+           title_filter: str | None = None, show: str | None = None) -> None:
     import yt_dlp
 
     Path(subs_dir).mkdir(parents=True, exist_ok=True)
@@ -72,10 +72,7 @@ def ingest(url: str, *, limit: int | None = None, lang: str = "en", subs_dir: st
     with yt_dlp.YoutubeDL(opts) as ydl:
         for e in entries:
             vid = e.get("id")
-            exists = conn.execute(
-                "SELECT 1 FROM episodes WHERE source='youtube' AND source_id=?", (vid,)
-            ).fetchone()
-            if exists:
+            if db.claim(conn, "youtube", vid, show):
                 continue
             vurl = e.get("url") or f"https://www.youtube.com/watch?v={vid}"
             if not vurl.startswith("http"):
@@ -91,10 +88,10 @@ def ingest(url: str, *, limit: int | None = None, lang: str = "en", subs_dir: st
             segs = parse_vtt(vtts[0].read_text(encoding="utf-8", errors="replace"))
             ep_id, _ = db.upsert_episode(
                 conn, source="youtube", source_id=vid, title=meta.get("title"),
-                url=f"https://www.youtube.com/watch?v={vid}", published=meta.get("upload_date"),
+                url=f"https://www.youtube.com/watch?v={vid}", published=meta.get("upload_date"), show=show,
             )
             n = db.add_segments(conn, ep_id, segs)
             conn.commit()
             added += 1
             print(f"  + {meta.get('title')}  ({n} lines)")
-    print(f"done: {added} new episodes. run `jbp index` next.")
+    print(f"done: {added} new episodes. run `clipsearch index` next.")

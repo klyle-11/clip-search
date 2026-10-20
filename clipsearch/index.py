@@ -4,6 +4,7 @@ import os
 import numpy as np
 
 from . import db
+from .config import env
 from .textnorm import norm
 
 _model = None
@@ -13,7 +14,7 @@ def get_model():
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer(os.getenv("JBP_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2"))
+        _model = SentenceTransformer(env("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2"))
     return _model
 
 

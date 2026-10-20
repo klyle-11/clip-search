@@ -27,7 +27,7 @@ def parse_note(text: str) -> list[tuple[float, float, str]]:
     return [(t, raw[i + 1][0] if i + 1 < len(raw) else t + 5, s) for i, (t, s) in enumerate(raw)]
 
 
-def ingest(folder: str) -> None:
+def ingest(folder: str, show: str | None = None) -> None:
     conn = db.connect()
     added = 0
     for path in sorted(Path(folder).expanduser().rglob("*.md")):
@@ -39,11 +39,9 @@ def ingest(folder: str) -> None:
         url = url_m.group(1) if url_m else None
         vid_m = VID_RE.search(url or "")
         # if we already have this video from yt-dlp, skip the duplicate
-        if vid_m and conn.execute(
-            "SELECT 1 FROM episodes WHERE source='youtube' AND source_id=?", (vid_m.group(1),)
-        ).fetchone():
+        if vid_m and db.claim(conn, "youtube", vid_m.group(1), show):
             continue
-        ep_id, new = db.upsert_episode(conn, source="obsidian", source_id=str(path), title=path.stem, url=url)
+        ep_id, new = db.upsert_episode(conn, source="obsidian", source_id=str(path), title=path.stem, url=url, show=show)
         if not new:
             continue
         db.add_segments(conn, ep_id, segs)

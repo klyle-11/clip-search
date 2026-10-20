@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clip Search</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1b1b1a; --muted: #6b6a66; --line: #e3e1db;
+  --accent: #c2410c; --accent-ink: #ffffff; --hl: #fff1c2; --ok: #15803d; --bad: #b91c1c; --run: #1d4ed8;
+  --radius: 8px; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #131312; --panel: #1c1c1a; --ink: #ecebe6; --muted: #9a988f; --line: #2e2d2a;
+          --accent: #f97316; --accent-ink: #1b1b1a; --hl: #4a3b0f; --ok: #4ade80; --bad: #f87171; --run: #60a5fa; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+         background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
+nav { display: flex; gap: 4px; }
+nav button { background: none; border: 0; padding: 6px 12px; border-radius: 6px; color: var(--muted); font: inherit; cursor: pointer; }
+nav button.on { background: var(--bg); color: var(--ink); font-weight: 600; }
+#status { margin-left: auto; color: var(--muted); font-size: 12px; display: flex; gap: 12px; align-items: center; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--run); margin-right: 4px; animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+section { display: none; } section.on { display: block; }
+input, select, textarea, button { font: inherit; color: inherit; }
+input, select, textarea { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+button.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+button.btn:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+button.small, a.small { padding: 3px 8px; font-size: 12px; }
+a.btn { color: inherit; text-decoration: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.muted { color: var(--muted); } .mono { font-family: var(--mono); font-size: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+
+/* search */
+#searchbar { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
+#q { font-size: 16px; padding: 10px 12px; }
+#opts { margin-top: 8px; }
+#opts label { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; }
+#opts input { width: 9em; } #opts input.num { width: 4.5em; }
+.split { display: grid; grid-template-columns: minmax(0, 1fr) 440px; gap: 16px; margin-top: 14px; align-items: start; }
+#player { position: sticky; top: 64px; padding: 10px; }
+#player .frame { aspect-ratio: 16/9; background: #000; border-radius: 6px; overflow: hidden; display: grid; place-items: center; color: #888; }
+#player .frame > * { width: 100%; height: 100%; border: 0; }
+#player audio { width: 100%; margin-top: 8px; }
+#nowplaying { margin-top: 8px; font-size: 13px; }
+#summary { color: var(--muted); margin: 0 0 8px; font-size: 13px; }
+.hit { padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+.hit.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.hit .top { display: flex; gap: 8px; align-items: baseline; }
+.hit .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hit .ts { font-family: var(--mono); font-size: 12px; color: var(--accent); white-space: nowrap; }
+.hit .acts { margin-left: auto; display: flex; gap: 4px; flex-shrink: 0; }
+.ctx { margin-top: 6px; font-size: 13px; }
+.ctx div { display: grid; grid-template-columns: 64px 1fr; gap: 8px; color: var(--muted); }
+.ctx div.m { color: var(--ink); } .ctx div.m span:last-child { background: var(--hl); border-radius: 3px; padding: 0 3px; }
+.ctx .t { font-family: var(--mono); font-size: 11px; padding-top: 2px; }
+.ep-head { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+/* sources */
+.cols { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 16px; align-items: start; }
+.pad { padding: 14px; }
+#src { width: 100%; min-height: 180px; font-family: var(--mono); font-size: 12px; resize: vertical; }
+#drop { border: 1.5px dashed var(--line); border-radius: 6px; padding: 12px; text-align: center; color: var(--muted); margin-top: 8px; cursor: pointer; }
+#drop.over { border-color: var(--accent); color: var(--ink); }
+#detect { font-size: 12px; margin: 8px 0; min-height: 1.4em; }
+.chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); white-space: nowrap; }
+.chip.done { color: var(--ok); border-color: currentColor; } .chip.failed { color: var(--bad); border-color: currentColor; }
+.chip.running { color: var(--run); border-color: currentColor; } .chip.queued, .chip.cancelled { color: var(--muted); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td a { color: inherit; text-decoration-color: var(--line); text-underline-offset: 3px; }
+td a:hover { text-decoration-color: var(--accent); }
+td.src { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+pre.log { margin: 6px 0 0; max-height: 220px; overflow: auto; background: var(--bg); padding: 8px; border-radius: 6px; font-size: 11px; white-space: pre-wrap; }
+details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.opts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 8px; }
+.opts-grid label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); }
+.check { display: flex !important; align-items: center; gap: 6px; }
+
+/* clips */
+#clips input.tm { width: 6.5em; font-family: var(--mono); font-size: 12px; padding: 4px 6px; }
+#clips td.txt { color: var(--muted); max-width: 420px; }
+.empty { padding: 40px; text-align: center; color: var(--muted); }
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg);
+         padding: 8px 14px; border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 10; }
+.toast.on { opacity: 1; }
+kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+
+@media (max-width: 980px) {
+  .split, .cols { grid-template-columns: 1fr; }
+  #player { position: static; order: -1; }
+  #player.idle { display: none; }
+  #searchbar { grid-template-columns: 1fr 1fr; } #q { grid-column: 1 / -1; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Clip Search</h1>
+  <nav>
+    <button data-tab="search" class="on">Search</button>
+    <button data-tab="sources">Sources</button>
+    <button data-tab="clips">Clips</button>
+    <button data-tab="library">Library</button>
+  </nav>
+  <div id="status"></div>
+</header>
+
+<main>
+<!-- SEARCH -->
+<section id="search" class="on">
+  <form id="searchbar" onsubmit="doSearch(); return false;">
+    <input id="q" placeholder='"4 in the morning" OR "5am"   ·   wake early   ·   morning NOT "good morning"' autofocus>
+    <select id="mode">
+      <option value="grep">every occurrence</option>
+      <option value="kw">keyword (ranked)</option>
+      <option value="hybrid">hybrid</option>
+      <option value="sem">semantic</option>
+      <option value="theme">theme</option>
+    </select>
+    <button class="btn primary">Search</button>
+  </form>
+  <div id="opts" class="row">
+    <label>show <select id="show"><option value="">all shows</option></select></label>
+    <label>episode title <input id="match" placeholder="regex, e.g. 9\d\d"></label>
+    <label>within <input id="near" class="num" type="number" value="15" min="1"> words</label>
+    <label>context <input id="ctx" class="num" type="number" value="1" min="0" max="10"> lines</label>
+    <label>speaker <input id="speaker" placeholder="optional"></label>
+    <label>add clips to <select id="cliplist"></select></label>
+    <span class="muted" style="font-size:12px">keys: <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>space</kbd> play · <kbd>a</kbd> add clip · <kbd>/</kbd> search</span>
+  </div>
+  <div class="split">
+    <div><p id="summary"></p><div id="hits"></div></div>
+    <div id="player" class="card idle">
+      <div class="frame" id="frame">pick a result to play</div>
+      <audio id="audio" controls hidden></audio>
+      <div id="nowplaying" class="muted"></div>
+    </div>
+  </div>
+</section>
+
+<!-- SOURCES -->
+<section id="sources">
+  <div class="cols">
+    <div class="card pad">
+      <div style="font-weight:600;margin-bottom:6px">Add sources</div>
+      <textarea id="src" placeholder="One per line — mix freely:
+https://www.youtube.com/@SomeChannel/videos
+https://www.youtube.com/playlist?list=...
+https://youtu.be/VIDEO_ID
+https://feeds.example.com/podcast.rss
+~/Vault/Clippings
+# comments are ignored"></textarea>
+      <div id="drop">drop .xml feeds or .txt lists here, or click to pick files<input type="file" id="files" multiple accept=".xml,.rss,.txt,.list" hidden></div>
+      <div id="detect" class="muted"></div>
+      <div class="opts-grid">
+        <label style="grid-column: 1 / -1">file under show<input id="a_show" list="showlist" placeholder="e.g. Joe Budden Podcast — blank: RSS uses the feed's title"></label>
+        <label>max items per source<input id="a_limit" type="number" min="1" placeholder="all"></label>
+        <label>title must match<input id="a_match" placeholder="regex"></label>
+        <label>treat URLs as<select id="a_kind"><option value="">auto-detect</option><option value="youtube">YouTube</option><option value="rss">RSS feed</option></select></label>
+        <label>whisper model (RSS)<select id="a_model"><option value="">default</option><option>small</option><option>medium</option><option>large-v3</option></select></label>
+        <label class="check"><input type="checkbox" id="a_index" checked> index when done</label>
+        <label class="check"><input type="checkbox" id="a_embed"> + embeddings</label>
+      </div>
+      <div class="row" style="margin-top:12px"><button class="btn primary" id="queue">Queue</button><span id="queued" class="muted"></span></div>
+    </div>
+    <div class="card pad">
+      <div class="row" style="margin-bottom:6px"><span style="font-weight:600">Jobs</span>
+        <button class="btn small" style="margin-left:auto" onclick="jobAction(0,'clear')">clear finished</button></div>
+      <table><thead><tr><th>#</th><th>kind</th><th>source</th><th>status</th><th></th></tr></thead><tbody id="jobs"></tbody></table>
+    </div>
+  </div>
+</section>
+
+<!-- CLIPS -->
+<section id="clips">
+  <div class="row" style="margin-bottom:12px">
+    <select id="listsel"></select>
+    <button class="btn" onclick="newList()">new list</button>
+    <span class="muted" id="cliptotal"></span>
+    <span style="margin-left:auto" class="row">
+      <button class="btn" onclick="downloadCsv()">download CSV</button>
+      <select id="fmt"><option>mp4</option><option>m4a</option><option>mp3</option></select>
+      <button class="btn primary" onclick="render()">render</button>
+    </span>
+  </div>
+  <div class="card"><table><thead><tr><th>#</th><th>episode</th><th>start</th><th>end</th><th>offset</th><th>len</th><th>line</th><th></th></tr></thead>
+    <tbody id="cliprows"></tbody></table></div>
+  <p class="muted" style="font-size:12px">Rendering cuts from each episode's local media file (RSS audio, or <span class="mono">clipsearch fetch-media</span> for YouTube).
+    <span class="mono">offset</span> shifts transcript time to media time if they differ.</p>
+</section>
+
+<!-- LIBRARY -->
+<section id="library">
+  <div class="row" style="margin-bottom:12px"><input id="libq" placeholder="filter titles" style="flex:1;max-width:420px">
+    <select id="libshow"><option value="*">all shows</option><option value="">(no show)</option></select>
+    <span id="libcount" class="muted"></span>
+    <button class="btn" style="margin-left:auto" onclick="fileShown()">file these under show…</button></div>
+  <datalist id="showlist"></datalist>
+  <div class="card"><table><thead><tr><th>title</th><th>show</th><th>source</th><th>published</th><th>lines</th><th>indexed</th><th>media</th><th></th></tr></thead>
+    <tbody id="eps"></tbody></table></div>
+</section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const fmt = sec => { sec = Math.max(0, Math.round(sec || 0)); const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`; };
+const parseTs = s => { const p = String(s).trim().split(":").map(Number); if (p.some(isNaN)) return null; return p.reduce((a, b) => a * 60 + b, 0); };
+const store = { get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+                set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 2200); }
+async function api(path, body) {
+  const r = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+  const j = await r.json(); if (j && j.error) { toast(j.error); throw new Error(j.error); } return j;
+}
+
+// ---------- tabs ----------
+let tab = "search";
+function show(t) {
+  tab = t; store.set("tab", t);
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+  document.querySelectorAll("main > section").forEach(s => s.classList.toggle("on", s.id === t));
+  if (t === "sources") loadJobs(); if (t === "clips") loadClips(); if (t === "library") loadEpisodes();
+}
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => show(b.dataset.tab));
+
+// ---------- status ----------
+let themes = [];
+async function loadStats() {
+  const s = await api("/api/stats");
+  const total = Object.values(s.episodes).reduce((a, b) => a + b, 0);
+  const eps = total ? `${s.shows.length} show${s.shows.length === 1 ? "" : "s"} · ${total} episodes` : "no episodes yet";
+  const running = (lastJobs || []).filter(j => j.status === "running" || j.status === "queued").length;
+  $("#status").innerHTML = `${running ? `<span><span class="dot"></span>${running} job${running > 1 ? "s" : ""}</span>` : ""}
+    <span>${esc(eps)}</span><span>${s.lines.toLocaleString()} lines</span>${s.unindexed ? `<span style="color:var(--bad)">${s.unindexed} unindexed</span>` : ""}`;
+  themes = s.themes;
+  const names = s.shows.map(x => x.name);
+  for (const [id, first] of [["#show", '<option value="">all shows</option>'],
+                             ["#libshow", '<option value="*">all shows</option><option value="">(no show)</option>']]) {
+    const el = $(id), cur = el.value;
+    el.innerHTML = first + names.map(n => `<option>${esc(n)}</option>`).join("");
+    el.value = [...el.options].some(o => o.value === cur) ? cur : el.options[0].value;
+  }
+  $("#showlist").innerHTML = names.map(n => `<option value="${esc(n)}">`).join("");
+}
+
+// ---------- search ----------
+let hits = [], sel = -1;
+["mode", "match", "near", "ctx", "speaker"].forEach(id => { const v = store.get("s_" + id); if (v != null) $("#" + id).value = v; });
+$("#mode").onchange = () => {
+  if ($("#mode").value === "theme" && themes.length && !themes.includes($("#q").value)) $("#q").value = themes[0];
+};
+async function doSearch() {
+  const params = {q: $("#q").value.trim(), mode: $("#mode").value, show: $("#show").value, match: $("#match").value, near: $("#near").value,
+                  ctx: $("#ctx").value, speaker: $("#speaker").value, limit: $("#mode").value === "grep" ? 500 : 50};
+  if (!params.q) return;
+  $("#q").blur();     // so j/k/space drive the results
+  ["mode", "match", "near", "ctx", "speaker"].forEach(k => store.set("s_" + k, $("#" + k).value));
+  history.replaceState(null, "", "#" + new URLSearchParams({q: params.q, mode: params.mode}));
+  $("#summary").textContent = "searching…";
+  const r = await api("/api/search?" + new URLSearchParams(params)).catch(() => null);
+  if (!r) { $("#summary").textContent = ""; return; }
+  hits = r.hits; sel = -1;
+  $("#summary").textContent = params.mode === "grep"
+    ? `${hits.length} occurrence${hits.length === 1 ? "" : "s"} in ${r.episodes} episode${r.episodes === 1 ? "" : "s"}`
+    : `${hits.length} results`;
+  renderHits(params.mode === "grep");
+}
+function renderHits(grouped) {
+  let html = "", lastEp = null;
+  hits.forEach((h, i) => {
+    const showTag = h.show && !$("#show").value ? `<span class="chip">${esc(h.show)}</span> ` : "";
+    if (grouped && h.episode_id !== lastEp) { html += `<div class="ep-head">${showTag}${esc(h.title)}</div>`; lastEp = h.episode_id; }
+    const t = h.at ?? h.start;
+    const ctx = h.context ? `<div class="ctx">${h.context.map(c =>
+        `<div class="${c.match ? "m" : ""}"><span class="t">${fmt(c.start)}</span><span>${c.speaker ? `<b>${esc(c.speaker)}:</b> ` : ""}${esc(c.text)}</span></div>`).join("")}</div>`
+      : `<div class="ctx muted">${esc(h.text.slice(0, 300))}${h.text.length > 300 ? "…" : ""}</div>`;
+    html += `<div class="hit card" data-i="${i}">
+      <div class="top">${grouped ? "" : `${showTag}<span class="title">${esc(h.title)}</span>`}<span class="ts">${fmt(t)}</span>
+        ${h.speakers ? `<span class="chip">${esc(h.speakers)}</span>` : ""}
+        <span class="acts">${h.url ? `<a class="btn small" href="${esc(h.url)}${h.url.includes("?") ? "&" : "?"}t=${Math.floor(t)}s" target="_blank" rel="noopener" onclick="event.stopPropagation()">↗</a>` : ""}
+          <button class="btn small" onclick="event.stopPropagation(); addClip(${i})">+ clip</button></span></div>${ctx}</div>`;
+  });
+  $("#hits").innerHTML = html || `<div class="empty">no matches — try <span class="mono">clipsearch vocab</span>-style variants, fewer words, or a wider "within"</div>`;
+  document.querySelectorAll(".hit").forEach(el => el.onclick = () => select(+el.dataset.i, true));
+}
+function select(i, play) {
+  if (i < 0 || i >= hits.length) return;
+  sel = i;
+  document.querySelectorAll(".hit").forEach(el => el.classList.toggle("sel", +el.dataset.i === i));
+  document.querySelector(`.hit[data-i="${i}"]`).scrollIntoView({block: "nearest"});
+  if (play) playHit(hits[i]);
+}
+
+// ---------- player ----------
+let yt = null, ytReady = false, ytPending = null;
+window.onYouTubeIframeAPIReady = () => { ytReady = true; if (ytPending) { const p = ytPending; ytPending = null; playYouTube(...p); } };
+function loadYTApi() { if (loadYTApi.done) return; loadYTApi.done = true; const s = document.createElement("script"); s.src = "https://www.youtube.com/iframe_api"; document.head.appendChild(s); }
+function playYouTube(vid, t) {
+  if (!ytReady) { ytPending = [vid, t]; loadYTApi(); return; }
+  if (!yt) {
+    $("#frame").innerHTML = '<div id="ytp"></div>';
+    yt = new YT.Player("ytp", {videoId: vid, playerVars: {start: Math.floor(t), autoplay: 1, rel: 0}});
+  } else yt.loadVideoById({videoId: vid, startSeconds: t});
+}
+function playAt(item, t) {
+  const audio = $("#audio");
+  if (item.video_id) {
+    audio.pause(); audio.hidden = true; $("#frame").style.display = "";
+    playYouTube(item.video_id, Math.max(0, t));
+  } else if (item.has_media) {
+    if (yt) yt.pauseVideo(); $("#frame").style.display = "none"; audio.hidden = false;
+    const src = `/media/${item.episode_id}`;
+    if (!audio.src.endsWith(src)) audio.src = src;
+    const go = () => { audio.currentTime = Math.max(0, t); audio.play(); };
+    audio.readyState >= 1 ? go() : audio.addEventListener("loadedmetadata", go, {once: true});
+  } else { toast("no YouTube link or local media for this episode"); return; }
+  $("#player").classList.remove("idle");
+  $("#nowplaying").innerHTML = `<b>${esc(item.title)}</b> · <span class="mono">${fmt(t)}</span>`;
+}
+const playHit = h => playAt(h, (h.at ?? h.start) - 2);
+
+// ---------- clips ----------
+let clipList = store.get("cliplist", "default"), knownLists = [];
+function fillListSelects() {
+  const lists = [...new Set([...knownLists, clipList])].sort();
+  const opts = lists.map(l => `<option ${l === clipList ? "selected" : ""}>${esc(l)}</option>`).join("");
+  $("#cliplist").innerHTML = opts; $("#listsel").innerHTML = opts;
+}
+$("#cliplist").onchange = e => { clipList = e.target.value; store.set("cliplist", clipList); fillListSelects(); };
+$("#listsel").onchange = e => { clipList = e.target.value; store.set("cliplist", clipList); fillListSelects(); loadClips(); };
+function newList() { const n = prompt("name for the new cutlist"); if (!n) return; clipList = n.trim(); store.set("cliplist", clipList); fillListSelects(); loadClips(); }
+async function addClip(i) {
+  const h = hits[i];
+  await api("/api/clip/add", {list: clipList, episode_id: h.episode_id, start: h.start, end: h.end, at: h.at,
+    text: h.context ? h.context.filter(c => c.match).map(c => c.text).join(" ") : h.text.slice(0, 300)});
+  toast(`added to “${clipList}”`);
+  if (!knownLists.includes(clipList)) { knownLists.push(clipList); fillListSelects(); }
+}
+let clips = [];
+async function loadClips() {
+  const r = await api("/api/clips?" + new URLSearchParams({list: clipList}));
+  knownLists = r.lists; fillListSelects(); clips = r.clips;
+  const total = clips.reduce((a, c) => a + (c.end - c.start), 0);
+  const noMedia = clips.filter(c => !c.has_media).length;
+  $("#cliptotal").textContent = clips.length ? `${clips.length} clips · ${fmt(total)} total${noMedia ? ` · ${noMedia} without local media` : ""}` : "";
+  $("#cliprows").innerHTML = clips.map((c, i) => `<tr>
+    <td class="muted">${i + 1}</td>
+    <td>${esc(c.title)}</td>
+    <td><input class="tm" value="${fmt(c.start)}" onchange="clipSet(${c.id}, 'start', this.value)"></td>
+    <td><input class="tm" value="${fmt(c.end)}" onchange="clipSet(${c.id}, 'end', this.value)"></td>
+    <td><input class="tm" style="width:4.5em" value="${c.offset}" onchange="clipSet(${c.id}, 'offset', this.value, true)"></td>
+    <td class="mono muted">${fmt(c.end - c.start).replace(/^00:/, "")}</td>
+    <td class="txt">${esc((c.text || "").slice(0, 160))}</td>
+    <td style="white-space:nowrap">
+      <button class="btn small" onclick="playAt(clips[${i}], clips[${i}].start)">▶</button>
+      <button class="btn small" onclick="clipMove(${c.id}, -1)">↑</button>
+      <button class="btn small" onclick="clipMove(${c.id}, 1)">↓</button>
+      <button class="btn small" onclick="clipDel(${c.id})">✕</button></td></tr>`).join("")
+    || `<tr><td colspan="8" class="empty">no clips in “${esc(clipList)}” yet — add some from search results</td></tr>`;
+}
+async function clipSet(id, k, v, raw) {
+  const val = raw ? parseFloat(v) : parseTs(v);
+  if (val == null || isNaN(val)) { toast("bad value"); return loadClips(); }
+  await api("/api/clip", {id, [k]: val}); loadClips();
+}
+const clipMove = async (id, d) => { await api("/api/clip", {id, move: d}); loadClips(); };
+const clipDel = async id => { await api("/api/clip", {id, delete: true}); loadClips(); };
+function downloadCsv() { location.href = "/api/cutlist.csv?" + new URLSearchParams({list: clipList}); }
+async function render() {
+  if (!clips.some(c => c.has_media)) { toast("none of these clips have local media yet"); return; }
+  const r = await api("/api/export", {list: clipList, render: true, format: $("#fmt").value});
+  toast(`render queued → ${r.out}`); show("sources");
+}
+
+// ---------- sources / jobs ----------
+let pendingFiles = [];
+const YT_RE = /(youtube\.com|youtu\.be)\//i;
+function detect() {
+  const lines = $("#src").value.split("\n").map(s => s.trim()).filter(s => s && !s.startsWith("#"));
+  const yt = lines.filter(l => YT_RE.test(l)).length, http = lines.filter(l => !YT_RE.test(l) && /^https?:\/\//.test(l)).length;
+  const other = lines.length - yt - http;
+  const parts = [yt && `${yt} YouTube`, http && `${http} feed URL${http > 1 ? "s" : ""}`, other && `${other} local path${other > 1 ? "s" : ""}`,
+                 pendingFiles.length && `${pendingFiles.length} file${pendingFiles.length > 1 ? "s" : ""}: ${pendingFiles.map(f => f.name).join(", ")}`].filter(Boolean);
+  $("#detect").textContent = parts.join(" · ");
+  $("#queue").textContent = lines.length + pendingFiles.length ? `Queue ${lines.length + pendingFiles.length}` : "Queue";
+}
+$("#src").oninput = detect;
+async function takeFiles(list) {
+  for (const f of list) pendingFiles.push({name: f.name, content: await f.text()});
+  detect();
+}
+const drop = $("#drop");
+drop.onclick = () => $("#files").click();
+$("#files").onchange = e => takeFiles(e.target.files);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); takeFiles(e.dataTransfer.files); };
+$("#queue").onclick = async () => {
+  const r = await api("/api/add", {text: $("#src").value, files: pendingFiles, show: $("#a_show").value, limit: $("#a_limit").value, match: $("#a_match").value,
+    kind: $("#a_kind").value, model: $("#a_model").value, index: $("#a_index").checked, embed: $("#a_embed").checked});
+  $("#queued").textContent = `queued ${r.queued} source${r.queued === 1 ? "" : "s"}` + (r.unrecognized.length ? ` · skipped: ${r.unrecognized.join(", ")}` : "");
+  if (r.queued) { $("#src").value = ""; pendingFiles = []; detect(); }
+  loadJobs();
+};
+let lastJobs = [], openLogs = new Set();
+async function loadJobs() {
+  lastJobs = await api("/api/jobs");
+  if (tab !== "sources") return;
+  $("#jobs").innerHTML = lastJobs.map(j => {
+    const src = j.params.source || j.params.out || (j.kind === "index" ? (j.params.embed ? "chunk + embed" : "chunk") : "");
+    const act = j.status === "queued" ? `<button class="btn small" onclick="jobAction(${j.id},'cancel')">cancel</button>`
+      : ["failed", "cancelled"].includes(j.status) ? `<button class="btn small" onclick="jobAction(${j.id},'retry')">retry</button>` : "";
+    const lastLine = (j.log.trim().split("\n").pop() || "").slice(0, 90);
+    return `<tr><td class="muted">${j.id}</td><td>${j.kind}</td>
+      <td class="src" title="${esc(src)}">${esc(src)}
+        ${j.log ? `<details ${openLogs.has(j.id) ? "open" : ""} ontoggle="this.open ? openLogs.add(${j.id}) : openLogs.delete(${j.id})">
+          <summary>${esc(lastLine)}</summary><pre class="log">${esc(j.log)}</pre></details>` : ""}</td>
+      <td><span class="chip ${j.status}">${j.status}</span></td><td>${act}</td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="empty">no jobs yet</td></tr>`;
+}
+async function jobAction(id, action) { await api("/api/job", {id, action}); loadJobs(); }
+
+// ---------- library ----------
+let episodes = [];
+async function loadEpisodes() { episodes = await api("/api/episodes"); drawEpisodes(); }
+function drawEpisodes() {
+  const q = $("#libq").value.toLowerCase(), sh = $("#libshow").value;
+  const rows = libRows = episodes.filter(e => (!q || (e.title || "").toLowerCase().includes(q)) && (sh === "*" || (e.show || "") === sh));
+  $("#libcount").textContent = `${rows.length} of ${episodes.length}`;
+  $("#eps").innerHTML = rows.map(e => `<tr><td>${e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.title)}</a>` : esc(e.title)}</td>
+    <td><button class="btn small" onclick="fileUnder([${e.id}], ${esc(JSON.stringify(e.show || ""))})">${e.show ? esc(e.show) : '<span class="muted">set…</span>'}</button></td>
+    <td class="muted">${e.source}</td><td class="muted mono">${esc(e.published || "")}</td><td>${e.lines}</td>
+    <td>${e.indexed ? "✓" : `<span style="color:var(--bad)">no</span>`}</td><td>${e.has_media ? "✓" : ""}</td>
+    <td><button class="btn small" onclick="delEpisode(${e.id}, this)">delete</button></td></tr>`).join("")
+    || `<tr><td colspan="8" class="empty">nothing ingested yet — add sources on the Sources tab</td></tr>`;
+}
+$("#libq").oninput = drawEpisodes;
+$("#libshow").onchange = drawEpisodes;
+let libRows = [];
+async function fileUnder(ids, current) {
+  const name = prompt(`File ${ids.length} episode${ids.length > 1 ? "s" : ""} under which show? (blank = none)`, current || "");
+  if (name === null) return;
+  await api("/api/episode/show", {ids, show: name.trim()});
+  await loadStats(); loadEpisodes();
+}
+const fileShown = () => libRows.length ? fileUnder(libRows.map(e => e.id), "") : toast("no episodes in view");
+async function delEpisode(id, btn) {
+  if (!confirm("Delete this episode and its transcript from the index? (local media files are kept)")) return;
+  await api("/api/episode/delete", {id}); loadEpisodes(); loadStats();
+}
+
+// ---------- keys / boot ----------
+document.addEventListener("keydown", e => {
+  if (e.target.matches("input, textarea, select")) { if (e.key === "Escape") e.target.blur(); return; }
+  if (tab !== "search") return;
+  if (e.key === "/") { e.preventDefault(); $("#q").focus(); $("#q").select(); }
+  else if (e.key === "j") select(Math.min(sel + 1, hits.length - 1), false);
+  else if (e.key === "k") select(Math.max(sel - 1, 0), false);
+  else if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (sel >= 0) playHit(hits[sel]); }
+  else if (e.key === "a" && sel >= 0) addClip(sel);
+});
+fillListSelects();
+api("/api/clips?" + new URLSearchParams({list: clipList})).then(r => {
+  knownLists = r.lists;
+  if (knownLists.length && !knownLists.includes(clipList)) { clipList = knownLists[0]; store.set("cliplist", clipList); }
+  fillListSelects();
+});
+setInterval(async () => {
+  const busy = lastJobs.some(j => j.status === "running" || j.status === "queued");
+  if (tab === "sources" || busy) { await loadJobs(); loadStats(); }
+}, 2000);
+loadJobs().then(loadStats);
+const h = new URLSearchParams(location.hash.slice(1));
+if (h.get("q")) { $("#q").value = h.get("q"); if (h.get("mode")) $("#mode").value = h.get("mode"); doSearch(); }
+show(store.get("tab", "search"));
+</script>
+</body>
+</html>
