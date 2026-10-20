@@ -4,6 +4,7 @@ import os
 import numpy as np
 
 from . import db
+from .textnorm import norm
 
 _model = None
 
@@ -60,8 +61,8 @@ def build(*, embeddings: bool = True, rechunk: bool = False) -> None:
             "SELECT start, end, text, speaker FROM segments WHERE episode_id=? ORDER BY start", (ep["id"],)
         ).fetchall()
         conn.executemany(
-            "INSERT INTO chunks(episode_id, start, end, text, speakers) VALUES (?,?,?,?,?)",
-            [(ep["id"], *c) for c in make_chunks(segs)],
+            "INSERT INTO chunks(episode_id, start, end, text, norm, speakers) VALUES (?,?,?,?,?,?)",
+            [(ep["id"], st, en, text, norm(text), spk) for st, en, text, spk in make_chunks(segs)],
         )
         conn.execute("UPDATE episodes SET indexed=1 WHERE id=?", (ep["id"],))
         conn.commit()

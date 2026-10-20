@@ -1,5 +1,6 @@
 """SQLite storage: episodes, timed segments, search chunks (+FTS5, +embedding BLOBs)."""
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     start       REAL NOT NULL,
     end         REAL NOT NULL,
     text        TEXT NOT NULL,
+    norm        TEXT,                   -- textnorm.norm(text): what FTS indexes
     speakers    TEXT,                   -- comma-joined speakers in window
     embedding   BLOB
 );
@@ -55,20 +57,42 @@ CREATE TABLE IF NOT EXISTS ep_speakers (
     PRIMARY KEY (episode_id, cluster)
 );
 CREATE INDEX IF NOT EXISTS chunk_ep ON chunks(episode_id, start);
+"""
+
+FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    text, content='chunks', content_rowid='id', tokenize='porter unicode61'
+    norm, content='chunks', content_rowid='id', tokenize='porter unicode61'
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vocab USING fts5vocab(chunks_fts, row);
 CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+    INSERT INTO chunks_fts(rowid, norm) VALUES (new.id, new.norm);
 END;
 CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO chunks_fts(chunks_fts, rowid, norm) VALUES ('delete', old.id, old.norm);
 END;
 """
 
 
 # columns added after v0.1 — ALTER existing DBs in place
-MIGRATIONS = [("episodes", "diarized", "INTEGER DEFAULT 0"), ("segments", "cluster", "TEXT")]
+MIGRATIONS = [("episodes", "diarized", "INTEGER DEFAULT 0"), ("segments", "cluster", "TEXT"), ("chunks", "norm", "TEXT")]
+
+
+def _regexp(pattern, value):
+    return value is not None and re.search(pattern, value, re.I) is not None
+
+
+def _migrate_fts(conn) -> None:
+    """v0.2 indexed raw chunks.text; now FTS indexes normalized text. Rebuild once if needed."""
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(chunks_fts)")]
+    if cols == ["norm"]:
+        return
+    from .textnorm import norm
+    conn.executescript("DROP TRIGGER IF EXISTS chunks_ai; DROP TRIGGER IF EXISTS chunks_ad; DROP TABLE IF EXISTS chunks_fts;")
+    rows = conn.execute("SELECT id, text FROM chunks WHERE norm IS NULL").fetchall()
+    conn.executemany("UPDATE chunks SET norm=? WHERE id=?", [(norm(r["text"]), r["id"]) for r in rows])
+    conn.executescript(FTS_SCHEMA)
+    conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
+    conn.commit()
 
 
 def connect(path: str | None = None) -> sqlite3.Connection:
@@ -82,6 +106,8 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     for table, col, decl in MIGRATIONS:
         if col not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    _migrate_fts(conn)
+    conn.create_function("REGEXP", 2, _regexp, deterministic=True)
     return conn
 
 

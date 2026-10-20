@@ -3,6 +3,11 @@ import tomllib
 from pathlib import Path
 
 
+def db_connect():
+    from . import db
+    return db.connect()
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="jbp", description="Search JBP transcripts and build compilation cut lists.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -62,12 +67,30 @@ def main(argv=None):
     s.add_argument("--limit", type=int, default=20)
     s.add_argument("--speaker", help="only hits where this speaker dominates (undiarized episodes pass through)")
     s.add_argument("--min-score", type=float, default=0.0)
+    s.add_argument("--match", help="regex on episode title, e.g. 'Episode 9[0-9]{2}'")
+    s.add_argument("--near", type=int, default=15, help="max words apart for unquoted words")
+    s.add_argument("-C", "--context", type=int, default=1, help="lines of context around the match")
     s.add_argument("--out", help="write a cutlist CSV")
+
+    g = sub.add_parser("grep", help="every occurrence of a phrase across the corpus, in episode/time order")
+    g.add_argument("query", help='e.g. \'"4 in the morning" OR "5am"\' — four==4, "4 a.m."==4am')
+    g.add_argument("--match", help="regex on episode title")
+    g.add_argument("--speaker")
+    g.add_argument("--near", type=int, default=15)
+    g.add_argument("-C", "--context", type=int, default=1)
+    g.add_argument("--limit", type=int)
+    g.add_argument("--gap", type=float, default=10.0, help="merge occurrences this close into one clip (cutlist)")
+    g.add_argument("--out", help="write a cutlist CSV (nearby occurrences merged)")
+
+    v = sub.add_parser("vocab", help="indexed spellings close to a word (catch caption misspellings)")
+    v.add_argument("word")
+    v.add_argument("-n", type=int, default=20)
 
     t = sub.add_parser("theme", help="run a saved theme from themes.toml")
     t.add_argument("name", nargs="?")
     t.add_argument("--file", default="themes.toml")
     t.add_argument("--speaker")
+    t.add_argument("--match", help="regex on episode title")
     t.add_argument("--out")
 
     c = sub.add_parser("cut", help="cut + stitch a reviewed cutlist with ffmpeg")
@@ -113,10 +136,20 @@ def main(argv=None):
         build(embeddings=not a.no_embed, rechunk=a.rechunk)
     elif a.cmd == "search":
         from . import search
-        hits = search.run(a.query, a.mode, a.limit, a.speaker, a.min_score)
-        search.print_hits(hits)
+        hits = search.run(a.query, a.mode, a.limit, a.speaker, a.min_score, a.match, a.near)
+        search.print_hits(hits, ctx=a.context)
         if a.out:
             search.write_cutlist(hits, a.out)
+    elif a.cmd == "grep":
+        from . import search
+        hits = search.grep(db_connect(), a.query, speaker=a.speaker, title=a.match, near=a.near, limit=a.limit)
+        search.print_grep(hits, ctx=a.context)
+        if a.out:
+            search.write_cutlist(search.merge_close(hits, a.gap), a.out)
+    elif a.cmd == "vocab":
+        from . import search
+        for term, docs, cnt in search.similar_terms(db_connect(), a.word, a.n):
+            print(f"{cnt:7d}  {term}  ({docs} chunks)")
     elif a.cmd == "theme":
         from . import search
         themes = tomllib.loads(Path(a.file).read_text())
@@ -124,7 +157,7 @@ def main(argv=None):
             for n, th in themes.items():
                 print(f"{n}: {th['description'][:100]}")
             return
-        hits = search.run_theme(themes[a.name], a.speaker)
+        hits = search.run_theme(themes[a.name], a.speaker, a.match)
         search.print_hits(hits)
         search.write_cutlist(hits, a.out or f"cutlists/{a.name}.csv")
     elif a.cmd == "cut":

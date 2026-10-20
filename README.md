@@ -27,6 +27,7 @@ jbp ingest-obsidian ~/Vault/Clippings
 jbp index
 
 # 5. Search
+jbp grep '"4 in the morning"'                 # every occurrence, with context lines + links
 jbp search "wake up at 4 in the morning" --mode kw
 jbp search "joe bragging about waking up early while everyone else sleeps" --mode sem
 jbp theme early-riser --out cutlists/early-riser.csv
@@ -34,6 +35,22 @@ jbp theme early-riser --out cutlists/early-riser.csv
 # 6. Edit the CSV (drop rows, set media_path/offset), then cut
 jbp cut cutlists/early-riser.csv --out out/early-riser.mp4
 ```
+
+## Searching dialogue
+`grep` lists **every** occurrence in episode/time order; `search --mode kw` ranks chunks (BM25) and pins
+each hit to the line where the words occur. Both print the matched line(s) with timestamps, context,
+and a YouTube link at that second.
+```bash
+jbp grep '"4 in the morning" OR "5am" OR "wake up early"' -C 2
+jbp grep 'noon alarm' --near 10               # unquoted words: all within N words of each other
+jbp grep 'morning NOT "good morning"' --match 'Episode 9\d\d'   # title regex filter
+jbp grep '"4 in the morning"' --out cutlists/4am.csv --gap 15    # nearby hits merged into one clip
+jbp vocab imani                               # how captions actually spelled it (amani? a money?)
+```
+- Phrases match across caption-line breaks ("…since four in the" / "morning that's why…").
+- Numbers and times are normalized on both sides: `four` = `4`, `4 a.m.` = `4am` = `4:00 AM`,
+  `don't` = `dont`. Light stemming: `wake` ~ `waking` ~ `wakes`. `wak*` = prefix.
+- Upgrading from an older DB rebuilds the FTS index on first run (no re-ingest, no re-embed).
 
 ## Speakers (filter to Joe)
 Diarization needs local audio. For YouTube episodes, `fetch-media` pulls it from the same video the

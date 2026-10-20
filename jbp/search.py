@@ -1,13 +1,15 @@
-"""Keyword (FTS5), semantic (cosine over stored embeddings), and hybrid (RRF) search."""
+"""Keyword (FTS5), semantic (cosine over stored embeddings), hybrid (RRF), and grep (every occurrence)."""
 import csv
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from . import db
+from . import db, dialogue
 from .index import speakers_by_time
+from .textnorm import norm, stem, tokens
 from .timeutil import fmt_ts, yt_link
 
 
@@ -25,17 +27,18 @@ class Hit:
     score: float = 0.0
     via: set = field(default_factory=set)
     line_speaker: str | None = None   # speaker of the line a keyword hit was focused on
+    at: float | None = None           # time of the matched words (keyword/grep hits)
+    at_last: float | None = None      # start of the last line the match touches
 
 
 _COLS = """c.id AS chunk_id, c.episode_id, e.title, e.url, e.media_path, c.start, c.end, c.text, c.speakers"""
 
 
-def _fts_query(q: str) -> str:
-    """Pass through quoted phrases / FTS operators; otherwise AND the bare words together."""
-    if any(ch in q for ch in '"*') or re.search(r"\b(AND|OR|NOT|NEAR)\b", q):
-        return q
-    words = re.findall(r"[\w']+", q)
-    return " ".join(f'"{w}"' for w in words)
+BEFORE, AFTER = 12.0, 30.0   # default clip window around a matched line
+
+
+def _title_sql(title: str | None) -> tuple[str, tuple]:
+    return (" AND e.title REGEXP ?", (title,)) if title else ("", ())
 
 
 MIN_SHARE = 0.4   # speaker must hold at least this much of the hit window's talk time
@@ -63,23 +66,29 @@ def _speaker_ok(conn, h: Hit, speaker: str | None) -> bool:
     return share is None or share >= MIN_SHARE   # undiarized episodes pass through
 
 
-def keyword(conn, q: str, limit: int = 50, speaker: str | None = None) -> list[Hit]:
+def keyword(conn, q: str, limit: int = 50, speaker: str | None = None, title: str | None = None,
+            near: int = 15) -> list[Hit]:
+    query = dialogue.parse(q)
+    tsql, targs = _title_sql(title)
     rows = conn.execute(
         f"""SELECT {_COLS}, bm25(chunks_fts) AS rank
             FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid JOIN episodes e ON e.id = c.episode_id
-            WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?""",
-        (_fts_query(q), limit * 3),
+            WHERE chunks_fts MATCH ?{tsql} ORDER BY rank LIMIT ?""",
+        (query.fts(), *targs, limit * 3),
     ).fetchall()
     hits = [Hit(**{k: r[k] for k in r.keys() if k != "rank"}, score=-r["rank"], via={"kw"}) for r in rows]
-    hits = [focus(conn, h, q, speaker) for h in hits]
+    hits = [anchor(conn, h, query, speaker, near) for h in hits]
     return [h for h in hits if _speaker_ok(conn, h, speaker)][:limit]
 
 
-def semantic(conn, q: str, limit: int = 50, speaker: str | None = None, min_score: float = 0.0) -> list[Hit]:
+def semantic(conn, q: str, limit: int = 50, speaker: str | None = None, min_score: float = 0.0,
+             title: str | None = None) -> list[Hit]:
     from .index import embed
 
+    tsql, targs = _title_sql(title)
     rows = conn.execute(
-        f"SELECT {_COLS}, c.embedding FROM chunks c JOIN episodes e ON e.id = c.episode_id WHERE c.embedding IS NOT NULL"
+        f"SELECT {_COLS}, c.embedding FROM chunks c JOIN episodes e ON e.id = c.episode_id WHERE c.embedding IS NOT NULL{tsql}",
+        targs,
     ).fetchall()
     if not rows:
         print("no embeddings yet — run `jbp index` with sentence-transformers installed")
@@ -109,25 +118,84 @@ def rrf(*lists: list[Hit], k: int = 60) -> list[Hit]:
     return sorted(merged.values(), key=lambda h: -h.score)
 
 
-def focus(conn, hit: Hit, q: str, speaker: str | None = None, before: float = 12.0, after: float = 30.0) -> Hit:
-    """Tighten a keyword hit to the best-matching segment in the chunk (preferring `speaker`'s lines)."""
-    words = [w.lower() for w in re.findall(r"[\w']{3,}", q) if w.upper() not in {"AND", "OR", "NOT", "NEAR"}]
-    if not words:
-        return hit
-    segs = conn.execute(
+def _segs(conn, episode_id: int, lo: float, hi: float):
+    return conn.execute(
         "SELECT start, end, text, speaker FROM segments WHERE episode_id=? AND start>=? AND start<? ORDER BY start",
-        (hit.episode_id, hit.start, hit.end),
+        (episode_id, lo, hi),
     ).fetchall()
-    def score(s):
-        mine = bool(speaker and s["speaker"] and s["speaker"].lower() == speaker.lower())
-        return sum(w in s["text"].lower() for w in words) + 0.5 * mine
-    best = max(segs, key=score, default=None)
-    if best is None or not any(w in best["text"].lower() for w in words):
-        return hit
-    hit.line_speaker = best["speaker"]
-    hit.start = max(hit.start, best["start"] - before)
-    hit.end = min(hit.end, best["end"] + after)
+
+
+def _place(hit: Hit, segs, i: int, t: float, last: int) -> Hit:
+    hit.at, hit.at_last, hit.line_speaker = t, segs[last]["start"], segs[i]["speaker"]
+    hit.start = max(0.0, t - BEFORE)
+    hit.end = segs[last]["end"] + AFTER
     return hit
+
+
+def anchor(conn, hit: Hit, query: dialogue.Query, speaker: str | None = None, near: int = 15) -> Hit:
+    """Pin a keyword hit to where the query actually occurs in the chunk (preferring `speaker`'s lines).
+
+    Falls back to the line sharing the most query words when the scanner can't confirm a match
+    (FTS's porter stemmer is looser than ours).
+    """
+    segs = _segs(conn, hit.episode_id, hit.start, hit.end)
+    if not segs:
+        return hit
+    occs = dialogue.find(segs, query, near)
+    if occs:
+        mine = [o for o in occs if speaker and (segs[o.seg]["speaker"] or "").lower() == speaker.lower()]
+        o = (mine or occs)[0]
+        return _place(hit, segs, o.seg, o.t, o.seg + o.span - 1)
+    want = {stem(w) for alt in query.alts for t in alt for w in t.words}
+    overlap = [len(want & {stem(w) for w in tokens(norm(s["text"]))}) for s in segs]
+    i = max(range(len(segs)), key=overlap.__getitem__)
+    return _place(hit, segs, i, segs[i]["start"], i) if overlap[i] else hit
+
+
+def grep(conn, q: str, *, speaker: str | None = None, title: str | None = None, near: int = 15,
+         limit: int | None = None) -> list[Hit]:
+    """Every occurrence of `q` across the corpus, in episode/time order (not ranked)."""
+    query = dialogue.parse(q)
+    tsql, targs = _title_sql(title)
+    rows = conn.execute(
+        f"""SELECT c.episode_id, c.start, c.end, e.title, e.url, e.media_path
+            FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid JOIN episodes e ON e.id = c.episode_id
+            WHERE chunks_fts MATCH ?{tsql} ORDER BY e.published, c.episode_id, c.start""",
+        (query.fts(), *targs),
+    ).fetchall()
+    # merge overlapping candidate chunks so each stretch of dialogue is scanned once
+    spans: list[list] = []
+    for r in rows:
+        if spans and spans[-1][0]["episode_id"] == r["episode_id"] and r["start"] <= spans[-1][2]:
+            spans[-1][2] = max(spans[-1][2], r["end"])
+        else:
+            spans.append([r, r["start"], r["end"]])
+    hits: list[Hit] = []
+    for r, lo, hi in spans:
+        segs = _segs(conn, r["episode_id"], lo, hi)
+        for o in dialogue.find(segs, query, near):
+            last = o.seg + o.span - 1
+            h = Hit(chunk_id=-1, episode_id=r["episode_id"], title=r["title"], url=r["url"],
+                    media_path=r["media_path"], start=0, end=0,
+                    text=" ".join(x["text"] for x in segs[o.seg:last + 1]), speakers=None, via={"grep"})
+            _place(h, segs, o.seg, o.t, last)
+            if not speaker or not h.line_speaker or h.line_speaker.lower() == speaker.lower():
+                hits.append(h)
+        if limit and len(hits) >= limit:
+            break
+    return hits[:limit] if limit else hits
+
+
+def merge_close(hits: list[Hit], gap: float = 10.0) -> list[Hit]:
+    """Time-ordered hits -> clips: occurrences close together in one episode become one longer clip."""
+    out: list[Hit] = []
+    for h in hits:
+        if out and out[-1].episode_id == h.episode_id and h.start <= out[-1].end + gap:
+            out[-1].end = max(out[-1].end, h.end)
+            out[-1].text += " … " + h.text
+        else:
+            out.append(Hit(**h.__dict__))
+    return out
 
 
 def dedupe_overlaps(hits: list[Hit], gap: float = 10.0) -> list[Hit]:
@@ -152,37 +220,85 @@ def window_speakers(conn, hits: list[Hit]) -> list[Hit]:
     return hits
 
 
-def run(q: str, mode: str = "hybrid", limit: int = 20, speaker: str | None = None, min_score: float = 0.0) -> list[Hit]:
+def run(q: str, mode: str = "hybrid", limit: int = 20, speaker: str | None = None, min_score: float = 0.0,
+        title: str | None = None, near: int = 15) -> list[Hit]:
     conn = db.connect()
     if mode == "kw":
-        hits = keyword(conn, q, limit * 2, speaker)
+        hits = keyword(conn, q, limit * 2, speaker, title, near)
     elif mode == "sem":
-        hits = semantic(conn, q, limit * 2, speaker, min_score)
+        hits = semantic(conn, q, limit * 2, speaker, min_score, title)
     else:
-        hits = rrf(keyword(conn, q, limit * 3, speaker), semantic(conn, q, limit * 3, speaker, min_score))
+        hits = rrf(keyword(conn, q, limit * 3, speaker, title, near),
+                   semantic(conn, q, limit * 3, speaker, min_score, title))
     return window_speakers(conn, dedupe_overlaps(hits)[:limit])
 
 
-def run_theme(theme: dict, speaker: str | None = None) -> list[Hit]:
+def run_theme(theme: dict, speaker: str | None = None, title: str | None = None) -> list[Hit]:
     conn = db.connect()
     limit = theme.get("limit", 30)
-    lists = [semantic(conn, theme["description"], limit * 3, speaker, theme.get("min_score", 0.0))]
+    lists = [semantic(conn, theme["description"], limit * 3, speaker, theme.get("min_score", 0.0), title)]
     for kw in theme.get("keywords", []):
         try:
-            lists.append(keyword(conn, kw, limit * 2, speaker))
+            lists.append(keyword(conn, kw, limit * 2, speaker, title))
         except Exception as e:  # bad FTS syntax shouldn't kill the run
             print(f"  ! keyword {kw!r}: {e}")
     return window_speakers(conn, dedupe_overlaps(rrf(*lists))[:limit])
 
 
-def print_hits(hits: list[Hit], width: int = 220) -> None:
+def _bold(line: str) -> str:
+    return f"\033[1m{line}\033[0m" if sys.stdout.isatty() else line
+
+
+def context_lines(conn, h: Hit, ctx: int = 1) -> list[str]:
+    """The matched line(s) plus `ctx` lines either side, each with its timestamp; matched lines marked >."""
+    segs = _segs(conn, h.episode_id, h.at - 120, h.at + 120)
+    first = max((i for i, s in enumerate(segs) if s["start"] <= h.at + 0.01), default=0)
+    last = max((i for i, s in enumerate(segs) if s["start"] <= (h.at_last or h.at) + 0.01), default=first)
+    out = []
+    for i in range(max(0, first - ctx), min(len(segs), last + 1 + ctx)):
+        s = segs[i]
+        spk = f"{s['speaker']}: " if s["speaker"] else ""
+        line = f"{fmt_ts(s['start'])}  {spk}{s['text']}"
+        out.append(_bold(f"  > {line}") if first <= i <= last else f"    {line}")
+    return out
+
+
+def print_hits(hits: list[Hit], width: int = 220, ctx: int = 1) -> None:
+    conn = db.connect()
     for n, h in enumerate(hits, 1):
-        snippet = h.text if len(h.text) <= width else h.text[:width] + "…"
+        when = fmt_ts(h.at) if h.at is not None else f"{fmt_ts(h.start)}–{fmt_ts(h.end)}"
         spk = f"  [{h.speakers}]" if h.speakers else ""
-        print(f"\n[{n}] {h.title}  {fmt_ts(h.start)}–{fmt_ts(h.end)}  ({'+'.join(sorted(h.via))} {h.score:.3g}){spk}")
+        print(f"\n[{n}] {h.title}  {when}  ({'+'.join(sorted(h.via))} {h.score:.3g}){spk}")
         if h.url:
-            print(f"    {yt_link(h.url, h.start)}")
-        print(f"    {snippet}")
+            print(f"    {yt_link(h.url, h.at if h.at is not None else h.start)}")
+        if h.at is not None:
+            print("\n".join(context_lines(conn, h, ctx)))
+        else:
+            print(f"    {h.text if len(h.text) <= width else h.text[:width] + '…'}")
+
+
+def print_grep(hits: list[Hit], ctx: int = 1) -> None:
+    conn = db.connect()
+    last_ep = None
+    for h in hits:
+        if h.episode_id != last_ep:
+            print(f"\n== {h.title}")
+            last_ep = h.episode_id
+        link = f"   {yt_link(h.url, h.at)}" if h.url else ""
+        print(f"  @ {fmt_ts(h.at)}{link}")
+        print("\n".join(context_lines(conn, h, ctx)))
+    eps = len({h.episode_id for h in hits})
+    print(f"\n{len(hits)} occurrences in {eps} episodes")
+
+
+def similar_terms(conn, word: str, n: int = 20) -> list[tuple[str, int, int]]:
+    """Indexed terms spelled like `word` -> [(term, chunks, occurrences)]. Terms are porter stems."""
+    import difflib
+    rows = {r["term"]: (r["doc"], r["cnt"]) for r in conn.execute("SELECT term, doc, cnt FROM chunks_vocab")}
+    w = (tokens(norm(word)) or [word.lower()])[0]
+    close = difflib.get_close_matches(w, rows, n=n, cutoff=0.6)
+    close += [t for t in rows if t.startswith(w[:4]) and t not in close][: max(0, n - len(close))]
+    return sorted(((t, *rows[t]) for t in close), key=lambda x: -x[2])
 
 
 CUT_FIELDS = ["keep", "title", "speakers", "start", "end", "pad", "offset", "media_path", "link", "text"]
